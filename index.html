@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实时音频转文字与OpenAI问答</title>
+</head>
+<body>
+    <h1>语音识别与OpenAI互动</h1>
+    <div id="outputText"></div>
+    <button onclick="startRecording()">开始录音</button>
+    <button onclick="playRecording()">播放录音</button>
+    <script>
+        let socket = new WebSocket('ws://localhost:5000/socket');
+        let mediaRecorder;
+        let audioChunks = [];
+        let audioContext;
+        let microphone;
+        let workletNode;
+        let analyser;
+        let noiseThreshold = 0.02; // 声音阈值，低于此值认为是噪音
+        
+
+
+        // WebSocket 连接
+        socket.onopen = function() {
+            console.log("WebSocket连接已打开");
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            console.log("收到消息:", data);
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.type === 'text') {
+                document.getElementById('outputText').innerText = "识别的文字: " + data.text;
+            } else if (data.type === 'answer') {
+                document.getElementById('outputText').innerText = "OpenAI回答: " + data.answer;
+                playAudio(data.answerAudio); // 播放OpenAI的语音回答
+            }
+        };
+
+        socket.onerror = function(error) {
+            console.log("WebSocket 连接错误: ", error);
+        };
+
+        socket.onclose = function(event) {
+            console.log("WebSocket 连接已关闭: ", event);
+        };
+
+        // 计算音量（通过求音频数据的均方根值）
+        function getVolume(inputData) {
+            let total = 0;
+            for (let i = 0; i < inputData.length; i++) {
+                total += inputData[i] * inputData[i];
+            }
+            return Math.sqrt(total / inputData.length);
+        }
+
+        // 加载 AudioWorkletProcessor
+        async function initializeAudio() {
+            console.log("初始化音频处理器");
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            console.log("默认采样率:", audioContext.sampleRate);
+
+            try {
+                await audioContext.audioWorklet.addModule('audioProcessor.js');  // 确保路径正确
+                console.log("AudioWorklet 已加载");
+            } catch (err) {
+                console.error("加载 AudioWorklet 时出错: ", err);
+            }
+
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;  // 设置FFT大小，值越大分辨率越高
+
+            microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
+            let source = audioContext.createMediaStreamSource(microphone);
+
+            // 创建并连接 AudioWorkletNode
+            workletNode = new AudioWorkletNode(audioContext, 'noise-filter-processor');
+            source.connect(analyser);
+            analyser.connect(workletNode);
+            // 去掉回音
+            //workletNode.connect(audioContext.destination);  // 输出到音频上下文
+
+            console.log("音频处理器已连接");
+            // 在此处添加用于音频处理的其他逻辑
+            workletNode.port.onmessage = (event) => {
+                console.log("音频处理器输出1");
+                // 处理音频处理器的输出
+                if (event.data) {
+                    // console.log("音频处理器输出2");
+                    // let audioBlob = new Blob([event.data], { type: 'audio/wav' });
+                    // console.log(audioBlob.size);
+                    // playAudio2(audioBlob);  // 播放音频
+
+                    // console.log("音频处理器输出3");
+                    // console.log(socket.readyState);
+                    // if (socket.readyState === WebSocket.OPEN) {
+                    //     console.log("音频处理器输出4");
+                    //     socket.send(audioBlob);  // 发送有效音频数据
+                    //     console.log("音频数据发送到后端");
+                    // }
+
+
+                    console.log("Received data:", event.data);
+                    console.log("Data type:", typeof event.data);
+                    console.log("Data instanceof Float32Array:", event.data instanceof Float32Array);
+
+
+                    //  // 检查 data 是否有效并且是 Float32Array 类型
+                    // if (event.data instanceof Float32Array && event.data.length > 0) {
+                    //     audioChunks.push(event.data);
+                    // } else {
+                    //     console.log("Invalid or empty audio data received.");
+                    // }
+
+                     // 如果收到的是 ArrayBuffer，转换为 Float32Array
+                    if (event.data instanceof ArrayBuffer) {
+                        const float32Array = new Float32Array(event.data);
+                        console.log("Converted to Float32Array:", float32Array);
+                        
+                        // 确保转换后的数组有效
+                        if (float32Array.length > 0) {
+                        audioChunks.push(float32Array);
+                        } else {
+                        console.log("Invalid or empty audio data after conversion.");
+                        }
+                    } else {
+                        console.log("Received non-ArrayBuffer data, skipping.");
+                    }
+
+                    console.log("audioChunks size: ", audioChunks.length);
+                }
+            };
+        }
+
+        // 1. 将多个音频块合并为一个 Float32Array 数组
+        function mergeAudioChunks(chunks) {
+            let totalLength = 0;
+           // 计算每个片段的长度，确保它们不是空数组
+            chunks.forEach((chunk, index) => {
+                if (chunk && chunk.length > 0) {
+                totalLength += chunk.length;
+                } else {
+                console.log(`Chunk ${index} is empty or invalid.`);
+                }
+            });
+
+            // 如果总长度为 0，说明没有有效的数据
+            if (totalLength === 0) {
+                console.log("No valid audio data to merge.");
+                return new Float32Array(0);  // 返回空数组
+            }
+
+            let mergedAudio = new Float32Array(totalLength);
+            let offset = 0;
+            
+            // 将每个有效的音频块合并到一个数组中
+            chunks.forEach((chunk) => {
+                if (chunk && chunk.length > 0) {
+                mergedAudio.set(chunk, offset);
+                offset += chunk.length;
+                }
+            });
+
+            console.log("Merged audio data length:", mergedAudio.length);
+
+            return mergedAudio;
+        }
+
+        // 2. 将 Float32Array 转换为 Int16Array（16-bit PCM 格式）
+        function float32ToInt16(samples) {
+        const int16Array = new Int16Array(samples.length);
+        for (let i = 0; i < samples.length; i++) {
+            int16Array[i] = Math.max(-1, Math.min(1, samples[i])) * 0x7FFF; // Clip and convert to 16-bit PCM
+        }
+        return int16Array;
+        }
+
+        // 3. 创建 WAV 文件并封装 Blob
+        function createWavBlob(samples, sampleRate, numChannels) {
+            const buffer = new ArrayBuffer(44 + samples.length * 2);  // 44-byte header + PCM data
+            const view = new DataView(buffer);
+
+            // 4. 写 WAV 文件头
+            writeString(view, 0, 'RIFF');  // "RIFF"标志
+            view.setUint32(4, 36 + samples.length * 2, true);  // 总字节数
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');  // "fmt "标志
+            view.setUint32(16, 16, true);  // 格式块大小（16字节，表示PCM格式）
+            view.setUint16(20, 1, true);  // 音频格式（1为线性PCM）
+            view.setUint16(22, numChannels, true);  // 通道数
+            view.setUint32(24, sampleRate, true);  // 采样率
+            view.setUint32(28, sampleRate * numChannels * 2, true);  // 每秒字节数
+            view.setUint16(32, numChannels * 2, true);  // 每个采样的字节数
+            view.setUint16(34, 16, true);  // 位深度（16位）
+            writeString(view, 36, 'data');  // "data"标志
+            view.setUint32(40, samples.length * 2, true);  // 数据块大小（字节数）
+
+            // 5. 写 PCM 数据（16-bit）
+            const int16Samples = float32ToInt16(samples);
+            for (let i = 0; i < int16Samples.length; i++) {
+                view.setInt16(44 + i * 2, int16Samples[i], true);
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        // 写字符串的辅助函数
+        function writeString(view, offset, str) {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+        }
+        }
+
+        function playRecording(){
+            try{
+                console.log("audioChunks size: ", audioChunks.length);
+
+                // Convert audioChunks from PCM to wav
+                console.log("Step 1");
+                // 合并音频数据
+                let mergedAudio = mergeAudioChunks(audioChunks);
+
+                console.log("mergedAudio size: ", mergedAudio.length);
+
+                // 假设采样率为 44100，单声道（1个通道）
+                //let sampleRate = 44100;
+                let sampleRate = audioContext.sampleRate;
+                let numChannels = 1;
+
+                console.log("Step 2");
+                // 创建 WAV 文件并封装为 Blob
+                const wavBlob = createWavBlob(mergedAudio, sampleRate, numChannels);
+
+                console.log("Step 3");
+                // 6. 播放 WAV 文件
+                const audioURL = URL.createObjectURL(wavBlob);  // 创建音频的 URL
+
+                console.log("Step 4");
+                const audioElement = new Audio(audioURL);
+
+                // audioElement.play().then(() => {
+                //     console.log("Audio is playing.");
+                // }).catch((error) => {
+                //     console.error("Audio play failed:", error);
+                // });
+                console.log("Step 6");
+
+                if (socket.readyState === WebSocket.OPEN) {
+                    console.log("音频处理器输出4");
+                    socket.send(wavBlob);  // 发送有效音频数据
+                    console.log("音频数据发送到后端");
+                }
+
+                audioChunks=[];
+            }
+            catch(err){
+                console.log("Error: ", err);
+            }
+        }
+
+        function playAudio2(audioBlob) {
+
+            console.log("A");
+            console.log(audioBlob.type);
+            // 创建一个 URL 来引用 Blob
+            let audioUrl = URL.createObjectURL(audioBlob);
+
+            console.log("B");
+            // 创建一个 audio 元素
+            let audio = new Audio(audioUrl);
+            audio.autoplay = true;
+
+            console.log("C");
+            // 播放音频
+            audio.play().then(() => {
+                console.log("音频播放成功");
+            }).catch((err) => {
+                console.error("播放音频时出错:", err);
+            });
+
+            console.log("D");
+            // 可选：音频播放结束后释放 Blob 对象
+            audio.onended = function () {
+                // 释放 URL 对象
+                URL.revokeObjectURL(audioUrl);
+            };
+
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(audioBlob);  // 发送有效音频数据
+                console.log("音频数据发送到后端");
+            }
+        }
+
+        // 开始录音
+        function startRecording() {
+            initializeAudio().then(() => {
+                console.log("AudioWorkletNode 已初始化并开始工作");
+            }).catch((err) => {
+                console.log("初始化失败: ", err);
+            });
+        }
+
+
+        // // 开始录音
+        // function startRecording() {
+        //     navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+        //         mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); // 使用 webm 格式
+        //         processor = audioContext.createScriptProcessor(1024, 1, 1); // 1024 samples per buffer
+        //         microphone.connect(analyser);
+        //         analyser.connect(processor);
+        //         processor.connect(audioContext.destination);
+
+        //         processor.onaudioprocess = function(event) {
+        //             let inputData = event.inputBuffer.getChannelData(0);
+        //             let volume = getVolume(inputData);
+
+        //             // 检查音频的音量是否高于阈值，如果低于则丢弃
+        //             if (volume > noiseThreshold) {
+        //                 let audioBlob = new Blob([inputData], { type: 'audio/wav' });
+        //                 if (socket.readyState === WebSocket.OPEN) {
+        //                     socket.send(audioBlob);  // 发送有效音频数据
+        //                     console.log("音频数据发送到后端");
+        //                 }
+        //             } else {
+        //                 console.log("过滤掉噪音");
+        //             }
+        //         };
+
+        //         // 监听数据捕获事件
+        //         // mediaRecorder.ondataavailable = function(event) {
+        //         //     console.log("捕获到音频数据:", event.data);
+        //         //     audioChunks.push(event.data);
+                    
+        //         //     // 检查是否音频数据被正常发送
+        //         //     if (socket.readyState === WebSocket.OPEN) {
+        //         //         socket.send(event.data);  // 发送音频数据
+        //         //         console.log("音频数据发送到后端");
+        //         //     } else {
+        //         //         console.log("WebSocket 连接不可用，音频数据未发送");
+        //         //     }
+        //         // };
+
+        //         mediaRecorder.onstart = function() {
+        //             console.log("录音已开始");
+        //         };
+
+        //         mediaRecorder.onstop = function() {
+        //             console.log("录音已停止");
+        //         };
+                
+        //         //mediaRecorder.start();
+        //         // 设置 ondataavailable 每 100ms 触发一次
+        //         mediaRecorder.start(1000);
+        //         console.log('支持的MIME类型:', MediaRecorder.isTypeSupported('audio/webm'));
+        //         //console.log("录音开始");
+        //     }).catch(function(err) {
+        //         console.log("获取音频失败: ", err);
+        //     });
+        // }
+
+
+        // 播放音频
+        function playAudio(answerAudio) {
+            const audio = new Audio(URL.createObjectURL(answerAudio));
+            audio.play();
+        }
+    </script>
+</body>
+</html>
